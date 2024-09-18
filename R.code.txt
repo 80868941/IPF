@@ -1,0 +1,1661 @@
+#1.DEG-------------------
+load('GSE33566.rda')
+library(limma)
+new_exprSet = as.data.frame(normalizeBetweenArrays(as.matrix(exprSet), method = "quantile")) 
+samplefile$Sample_Group = factor(samplefile$Sample_Group, levels = c("IP", "HC"))
+design = model.matrix(~ 0 + samplefile$Sample_Group)
+colnames(design) = levels(samplefile$Sample_Group)
+contrast.matrix = makeContrasts("IP-HC", levels = design)
+deg = function(exprSet, design, contrast.matrix, coef){
+  fit = lmFit(exprSet, design)
+  library(futile.logger)
+  fit2 = contrasts.fit(fit, contrast.matrix)
+  fit2 = eBayes(fit2)
+  tepmOutput = topTable(fit2, coef = coef, adjust.method = "fdr", number = 50000)
+  nrDEG = na.omit(tepmOutput)
+  return(nrDEG)
+  
+}
+nrDEG1 = deg(new_exprSet, design, contrast.matrix, coef = 1)
+nrDEG1 <- as.data.frame(nrDEG1)
+nrDEG1 <- cbind(rownames(nrDEG1), nrDEG1)
+colnames(nrDEG1)[1] <- "gene_symbol"
+
+nrDEG1_all <- nrDEG1[which(nrDEG1$adj.P.Val < 0.05 & abs(nrDEG1$logFC) >= 0.58), ]
+nrDEG1_all[which(nrDEG1_all$logFC > 0), "group"] <- "up"
+nrDEG1_all[which(nrDEG1_all$logFC < 0), "group"] <- "down"
+table(nrDEG1_all$group)
+write.table(nrDEG1_all, file = "GSE33566nrDEG1_all.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+save(exprSet, samplefile, nrDEG1, nrDEG1_all, file = "GSE33566_DEG_0.58.rda")
+#volcano2-----------------------
+library(ggpubr)
+library(ggthemes)
+data = nrDEG1
+data$Group <- as.factor(ifelse(data$adj.P.Val < 0.05 & abs(data$logFC) >= 0, ifelse(data$logFC >= 0, 'up-regulated','down-regulated'),'not-significant'))
+data$Label <- ""
+data <- data[order(data$adj.P.Val), ]
+up.genes <- head(data$gene_symbol[which(data$Group == "up-regulated")], 10)
+down.genes <- head(data$gene_symbol[which(data$Group == "down-regulated")], 10)
+top10.genes <- c(as.character(up.genes), as.character(down.genes))
+data$Label[match(top10.genes, data$gene_symbol)] <- top10.genes
+data$logP <- -log10(data$adj.P.Val)
+p <-ggscatter(data, x = "logFC", y = "logP", color = "Group", 
+              palette = c("#2f5688", "#BBBBBB", "#CC0000"), size = 1, label = data$Label, 
+              font.label = 8, repel = TRUE, xlab = "log2FoldChange", ylab = "-log10(Agjust P-value)") + 
+  theme_base() + 
+  geom_hline(yintercept = 1.30, linetype = "dashed") + geom_vline(xintercept = c(-0.58, 0.58), linetype = "dashed")
+p
+ggsave(p, filename = "volcano.pdf", width = 20, height = 15, units = c("cm"))
+dev.off()
+#heapmap1
+library(pheatmap)
+data <- as.matrix(exprSet)
+x = nrDEG1_all$logFC
+names(x) = nrDEG1_all$gene_symbol
+choose_gene = c(names(head(sort(x, decreasing = TRUE), 30)), names(tail(sort(x, decreasing = TRUE), 30)))
+choose_matrix = data[choose_gene, ]
+choose_matrix = t(scale(t(choose_matrix)))
+choose_matrix[choose_matrix > 2] = 2
+choose_matrix[choose_matrix< -2] = -2
+annotation_col = data.frame(Group = samplefile$Sample_Group)
+rownames(annotation_col) = colnames(data)
+color <- colorRampPalette(c("#3300CC", "#3399FF", "white", "#FF3333", "#CC0000"))(50)
+pdf("Heatmap.pdf", width = 10, height = 25)
+pheatmap(choose_matrix, color = color, border_color = NA, annotation_col = annotation_col, 
+         cluster_row = F, cluster_cols = F, show_colnames = F)
+dev.off()
+
+#2.WGCNA -------------------------------
+rm(list = ls())
+setwd("") 
+library(WGCNA)
+library(RColorBrewer)
+options(stringsAsFactor = FALSE)
+allowWGCNAThreads()
+load('GSE33566.rda')
+#Step1
+SampleFile = read.table("SamplefileGSE56815.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+expr = exprSet
+dim(expr)
+m.vars = apply(expr, 1, var)
+#expr1 = expr[which(m.vars > quantile(m.vars, probs = seq(0, 1, 0.25))[4]), ]
+expr1 = expr[order(apply(expr,1,mad), decreasing = T)[1:5000],] 
+
+dim(expr1)
+
+datExpr0 = as.data.frame(t(expr1))
+gsg = goodSamplesGenes(datExpr0, verbose=3)
+gsg$allOK
+sampleTree = hclust(dist(datExpr0), method="average")
+par(mar = c(0, 4, 2, 0))
+par(cex = 0.6)
+plot(sampleTree, main="Sample clustering to detect outliers", sub="", xlab="", cex.lab=1.5, cex.axis=1.5, cex.main=2)
+cutHeight = 85 
+abline(h=cutHeight, col="red")
+dev.off()
+
+clust = cutreeStatic(sampleTree, cutHeight = cutHeight, minSize = 10)
+table(clust)
+
+keepSamples = (clust==1)
+datExpr = datExpr0[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+samplefile1<-read.delim('samplefile.txt',sep='\t',header = T,row.names= 1,check.names = F)
+samplefile1$Sample_Name = rownames(samplefile1) 
+combat_samplefile1 = samplefile1   
+
+datTraits = combat_samplefile1
+rownames(datTraits) = datTraits$Sample_Name
+datTraits$Sample_Group = factor(datTraits$Sample_Group)
+
+#Step2
+powers = c(c(1:10), seq(from=12, to=20, by=2))
+sft = pickSoftThreshold(datExpr, powerVector=powers, verbose=5, networkType="unsigned")
+
+#pdf(file="02.sample_soft_threshold.pdf", onefile=FALSE, paper="special", width=25, height=10, bg="white", pointsize=6)
+par(mfrow=c(1,2))
+cex1 = 0.6
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3])*sft$fitIndices[, 2], xlab="Soft Threshold (power)", ylab="Scale Free Topology Model Fit, signed R^2", type="n", main=paste("Scale independence"))
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3])*sft$fitIndices[, 2], labels=powers, cex=cex1, col="red")
+abline(h=0.85, col="red")
+
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5], xlab="Soft Threshold (power)", ylab="Mean Connectivity", type="n", main=paste("Mean Connectivity"))
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels=powers, cex=cex1, col="red")
+dev.off()
+
+softPower =sft$powerEstimate
+#Step3
+adjacency = adjacency(datExpr, power=softPower, type="unsigned")
+TOM = TOMsimilarity(adjacency)
+dissTOM = 1 - TOM
+
+geneTree = hclust(as.dist(dissTOM), method="average")
+plot(geneTree, xlab="", sub="", main="Gene clustering on TOM-based dissimilarity", label=FALSE, hang=0.04)
+dev.off()
+
+minModuleSize = 50
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM, deepSplit = 2, pamRespectsDendro = FALSE, minClusterSize = minModuleSize)
+table(dynamicMods)
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05, main = "Gene dendrogram and module colors")
+dev.off()
+
+MEList = moduleEigengenes(datExpr, colors = dynamicColors)
+MEs = MEList$eigengenes
+MEDiss = 1 - cor(MEs)
+METree = hclust(as.dist(MEDiss), method = "average");
+
+plot(METree, main = "Clustering of module eigengenes", xlab = "", sub = "")
+
+MEDissThres = 0.25
+abline(h=MEDissThres, col = "red")
+merge = mergeCloseModules(datExpr, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+mergedColors = merge$colors
+mergedMEs = merge$newMEs
+
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors), c("Dynamic Tree Cut", "Merged dynamic"), dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+dev.off()
+
+moduleColors = mergedColors
+table(moduleColors)
+colorOrder = c("grey", standardColors(50))
+moduleLabels = match(moduleColors, colorOrder) - 1
+table(moduleLabels)
+MEs = mergedMEs
+
+#Step4---------------------------------------
+design = model.matrix(~0 + datTraits$Sample_Group)
+colnames(design)=levels(datTraits$Sample_Group)
+
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+
+moduleTraitCor = cor(MEs, design, use="p")#datTraits$Tregs
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(", signif(moduleTraitPvalue, 1), ")", sep = "")
+dim(textMatrix) = dim(moduleTraitCor)
+
+#pdf(file="04.modules_traits_relationships.pdf", onefile=FALSE, paper="special", width=25, height=10, bg="white", pointsize=6)
+par(mar = c(6, 9, 3, 3))
+#labeledHeatmap(Matrix = moduleTraitCor, xLabels = "Tregs", yLabels = names(MEs), ySymbols = names(MEs), colorLabels = FALSE, colors = blueWhiteRed(50), textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.5, xLabelsAngle=90, zlim = c(-1,1), main = paste("Module-trait relationships"))
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = colnames(design), yLabels = names(MEs), ySymbols = names(MEs), colorLabels = FALSE, colors = blueWhiteRed(50), textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.5, xLabelsAngle=90, zlim = c(-1,1), main = paste("Module-trait relationships"))
+dev.off()
+save(datExpr, moduleColors, design, file = "GSE33566_WGCNA.rda")
+
+load("GSE33566_WGCNA.rda")
+TOM = TOMsimilarityFromExpr(datExpr, power = softPower, networkType = "unsigned")
+
+module = "brown" #megenta
+inModule = (moduleColors==module)
+probes = names(datExpr)
+modProbes = probes[inModule]
+modGenes = modProbes
+modTOM = TOM[inModule, inModule]
+dimnames(modTOM) = list(modProbes, modProbes)
+module = "brown"
+probes = names(datExpr)
+inModule = (moduleColors==module)
+modProbes = probes[inModule]
+IMConn = softConnectivity(datExpr[, modProbes], power=softPower)
+
+dat1 = datExpr[inModule]
+datExpr_IMConn <- data.frame(IMConn, t(dat1))
+out = cbind(modProbes, IMConn)
+colnames(out) = c("gene", "connectivity")
+out = out[order(as.numeric(out[, 2]), decreasing=TRUE), ]
+out = as.data.frame(out)
+out$connectivity = as.numeric(out$connectivity)
+write.table(out, file=paste(module, "-module-gene-GSE33566.txt", sep=""), sep="\t", quote=FALSE, row.names=FALSE)
+#GSEA-----------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("") 
+load('')
+
+raw_data1 = exprSet
+raw_data1 = raw_data1[,samplefile$Sample_Name]
+exprSet1 = raw_data1[nrDEG1_all[nrDEG1_all$group != "no sig",]$gene_symbol,]
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(rvcheck)
+library(ggplot2)
+
+symbol2entrezid <- bitr(nrDEG1_all$gene_symbol, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+nrDEG_risk <- merge(nrDEG1_all, symbol2entrezid, by.x = "gene_symbol", by.y = "SYMBOL")
+write.table(symbol2entrezid, file = "symbol2entrezid.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = TRUE)
+
+gene = nrDEG_risk[nrDEG_risk$group != "no sig",]$ENTREZID
+res_GO = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "ALL", pAdjustMethod = "BH",  pvalueCutoff  = 0.05, qvalueCutoff  = 0.05, readable = TRUE)
+dotplot(res_GO, showCategory = 10, split = "ONTOLOGY") + facet_grid(ONTOLOGY~., scale = "free")
+
+res_GO_BP = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "BP", pAdjustMethod = "BH",  pvalueCutoff  = 0.05, qvalueCutoff  = 0.05, readable = TRUE)
+res_GO_BP_simp <- simplify(res_GO_BP, cutoff=0.7, by = "p.adjust", select_fun = min)                  
+dotplot(res_GO_BP_simp, showCategory = 10)
+write.table(as.data.frame(res_GO_BP_simp@result), file = "res_GO_BP_simp.txt", quote = FALSE, row.names=FALSE, col.names=TRUE)
+BP = res_GO_BP_simp@result
+
+res_GO_CC = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "CC", pAdjustMethod = "BH",  pvalueCutoff  = 0.05, qvalueCutoff  = 0.05, readable = TRUE)
+res_GO_CC_simp <- simplify(res_GO_CC, cutoff=0.7, by = "p.adjust", select_fun = min)                  
+dotplot(res_GO_CC_simp, showCategory = 10)
+write.table(as.data.frame(res_GO_CC_simp@result), file = "res_GO_CC_simp.txt", quote = FALSE, row.names=FALSE, col.names=TRUE)
+CC = res_GO_CC_simp@result
+
+res_GO_MF = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "MF", pAdjustMethod = "BH",  pvalueCutoff  = 0.05, qvalueCutoff  = 0.05, readable = TRUE)
+res_GO_MF_simp <- simplify(res_GO_MF, cutoff=0.7, by = "p.adjust", select_fun = min)                  
+dotplot(res_GO_MF_simp, showCategory = 10)
+write.table(as.data.frame(res_GO_MF_simp@result), file = "res_GO_MF_simp.txt", quote = FALSE, row.names=FALSE, col.names=TRUE)
+MF = res_GO_MF_simp@result
+
+res_KEGG <- enrichKEGG(gene = nrDEG_risk$ENTREZID, organism = "human", keyType = "kegg", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.05, use_internal_data = FALSE)
+res_KEGG <- setReadable(res_KEGG, OrgDb = org.Hs.eg.db, keyType = 'ENTREZID')
+write.table(as.data.frame(res_KEGG@result), file = "res_KEGG_simp.txt", quote = FALSE, row.names=FALSE, col.names=TRUE)
+dotplot(res_KEGG, showCategory = 10)
+KEGG = res_KEGG@result
+
+
+#-----------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("")
+Intersect <- read.table("Intersect.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+load("1_GSE33566.rda")
+exprSet= exprSet1
+Inter_exp = exprSet[Intersect$Intersect,]
+save(Inter_exp, samplefile, file = "intersect.rda")
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(rvcheck)
+library(ggplot2)
+
+symbol2entrezid <- bitr(Intersect$Intersect, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+nrDEG_risk <- merge(Intersect, symbol2entrezid, by.x = "Intersect", by.y = "SYMBOL")
+
+gene = nrDEG_risk$ENTREZID
+res_GO = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, keyType = "ENTREZID", ont = "ALL", pAdjustMethod = "BH",  pvalueCutoff  = 0.05, qvalueCutoff  = 0.05, readable = TRUE)
+dotplot(res_GO, showCategory = 5, split = "ONTOLOGY") + facet_grid(ONTOLOGY~., scale = "free")
+
+res_KEGG <- enrichKEGG(gene = nrDEG_risk$ENTREZID, organism = "human", keyType = "kegg", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.05, use_internal_data = FALSE)
+res_KEGG <- setReadable(res_KEGG, OrgDb = org.Hs.eg.db, keyType = 'ENTREZID')
+write.table(as.data.frame(res_KEGG@result), file = "res_KEGG_simp.txt", quote = FALSE, row.names=FALSE, col.names=TRUE)
+dotplot(res_KEGG, showCategory = 10)
+KEGG = res_KEGG@result
+
+#------------------
+load("")
+SampleFile = samplefile
+samplefile$Sample_Name = rownames(samplefile) 
+SampleFile$Sample_Group = as.factor(SampleFile$Sample_Group)
+SampleFile = SampleFile[order(SampleFile$Sample_Group,decreasing = F),]
+
+exprSet = Inter_exp
+exprSet = exprSet[,match(SampleFile$Sample_Name,colnames(exprSet))]
+exprSet = as.data.frame(t(exprSet))
+exprSet$Sample_Group = SampleFile$Sample_Group; exprSet = exprSet[,c(ncol(exprSet),1:ncol(exprSet)-1)]
+data = exprSet
+#Boruta----------------------------------------------
+library(Boruta)
+set.seed(1234)
+boruta.train <- Boruta(Sample_Group ~ ., data=data, doTrace=2, maxRuns=1000)
+print(boruta.train)
+
+final.boruta <- TentativeRoughFix(boruta.train)
+print(final.boruta)
+
+plot(final.boruta, xlab="", xaxt="n")
+lz <- lapply(1:ncol(final.boruta$ImpHistory), function(i) final.boruta$ImpHistory[is.finite(final.boruta$ImpHistory[, i]), i])
+names(lz) <- colnames(final.boruta$ImpHistory)
+Labels <- sort(sapply(lz, median)) 
+axis(side=1, las=2, labels=names(Labels), at=1:ncol(final.boruta$ImpHistory), cex.axis=0.5, font=4)
+dev.off()
+
+predBoruta_g = getSelectedAttributes(final.boruta, withTentative = F)
+predBoruta_g
+write.table(predBoruta_g, file = "Boruta.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = T)
+#LASSO&SVM-RFE-------------------------------------------------------
+x <- as.matrix(data[,-1])
+y <- data$Sample_Group
+library(glmnet)
+set.seed(1234)
+fit = glmnet(x, y, family = "binomial",alpha = 1,lambda = NULL)
+
+plot(fit, xvar = "dev", label = TRUE)
+
+cvfit = cv.glmnet(x, y, family = "binomial", type.measure = "class")
+plot(cvfit)
+
+cvfit$lambda.min
+cvfit$lambda.1se
+myCoefs <- coef(cvfit, s="lambda.min");
+lasso_fea<-myCoefs@Dimnames[[1]][which(myCoefs != 0 )]
+lasso_fea<-lasso_fea[-1];
+lasso_fea
+write.table(lasso_fea, "lasso.txt", sep = "\t", row.names=FALSE)
+
+library(parallel)
+library(doParallel)
+cl <- makeCluster(4)#detectCores()
+registerDoParallel(cl)
+library(caret)
+library(randomForest)
+set.seed(1234)
+subsets = seq(1, ncol(x), by = 1)
+caretFuncs$summary = defaultSummary
+rfe_ctrl = rfeControl(functions=rfFuncs, method="repeatedcv", number=5, repeats=3, verbose=FALSE, returnResamp="final", allowParallel=TRUE)
+system.time(
+  rfe.train <- rfe(x, y, sizes=subsets, rfeControl=rfe_ctrl, method = "rf")#svmLinear
+)
+print(rfe.train)
+stopCluster(cl)
+registerDoSEQ()
+
+plot(rfe.train, type=c("g", "o"), cex = 0.1, col = "firebrick3", lwd=3)
+plot(rfe.train, type=c("g", "o"), cex = 0.1, col = "blue", lwd=3)
+#plot(rfe.train, type = c("o", "g"), cex = 1.0, col = 1:length(subsets))
+dev.off()
+
+rfe_fea <- predictors(rfe.train)
+rfe_fea
+write.table(rfe_fea, "SVM-RFE.txt", sep = "\t", row.names=FALSE)
+
+com = intersect(lasso_fea, rfe_fea)
+com
+
+
+#RF------------------------
+library(randomForest)
+set.seed(1234)
+
+data = Inter_exp
+data=t(data)
+group=gsub("(.*)\\_(.*)", "\\2", row.names(data))  
+
+rf=randomForest(as.factor(group)~., data=data, ntree=500)
+plot(rf, main="Random forest", lwd=2)
+dev.off()
+
+optionTrees=which.min(rf$err.rate[,1])
+optionTrees
+rf2=randomForest(as.factor(group)~., data=data, ntree=optionTrees)
+
+importance=importance(x=rf2)
+
+varImpPlot(rf2, main="")
+dev.off()
+
+rfGenes=importance[order(importance[,"MeanDecreaseGini"], decreasing = TRUE),]
+rfGenes=names(rfGenes[rfGenes>2])       
+write.table(rfGenes, file="rfGenes.txt", sep="\t", quote=F, col.names=F, row.names=F)
+
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("")
+
+Intersect <- read.table("Intersect.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+load("GSE33566.rda")
+
+Inter_exp = exprSet[Intersect$Intersect,]
+
+library(ggplot2) 
+library(RColorBrewer) 
+library(ggpubr)
+library(preprocessCore)
+library(e1071)
+library(parallel)
+library(data.table)
+
+
+
+tcga_tmp = Inter_exp
+rownames(samplefile)=samplefile$Sample_Name
+
+TSPYL2_exp = tcga_tmp[rownames(tcga_tmp) == "FCMR",]
+TSPYL2_exp = as.data.frame(t(TSPYL2_exp))
+
+TSPYL2_exp$Sample_Name = rownames(TSPYL2_exp)
+
+TSPYL2_exp1 = as.data.frame(TSPYL2_exp[rownames(samplefile),])
+
+
+data2 = merge(TSPYL2_exp1, samplefile, by="Sample_Name")
+data2$Sample_Group = as.factor(data2$Sample_Group)
+compaired <- list(c("IP", "HC"))  
+palette<-c(brewer.pal(7,"Set2")[c(1,2,4,5)])  colnames(data2)
+ggboxplot(data2, 
+          x = "Sample_Group", y = "FCMR", 
+          fill = "Sample_Group", palette = palette, 
+          add = "jitter", size = 0.5)+    
+  stat_compare_means(comparisons = compaired, 
+                     method = "wilcox.test",  
+                     symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns"))) 
+dev.off()
+
+
+library(pROC)
+library(ggplot2)
+
+
+BRCA=data2
+res<-roc(Sample_Group~FCMR,data=BRCA,aur=TRUE,
+         ci=TRUE, 
+         percent=TRUE,         smooth=F,
+         levels=c('IP','HC'),direction=">" )
+
+res<-roc(Sample_Group~FCMR,data=BRCA,aur=TRUE,
+         ci=TRUE, 
+         percent=TRUE,          smooth=F,
+         levels=c('HC','IP'),direction=">" )
+p<- ggroc(res, color ="red",legacy.axes = TRUE)+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgrey", linetype=4)+
+  theme_bw() + 
+  ggtitle("FCMR ROC Curve")+
+  theme(plot.title = element_text(hjust = 0.5,size = 16),
+        axis.text=element_text(size=12,colour = "black"),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14))
+
+p+annotate("text",x=0.75,y=0.25,label=paste("AUC = ", round(res$auc,3)))+
+  annotate("text",x=0.75,y=0.20,label=paste("95%CI: ", round(res$ci[1],3),'-',round(res$ci[3],3)))
+
+dev.off()
+
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("") 
+library(ggplot2) 
+library(RColorBrewer) 
+library(ggpubr)
+library(preprocessCore)
+library(e1071)
+library(parallel)
+library(data.table)
+
+exprSet1 = read.table("GSE93606_gene_matrix.txt", header=T, sep="\t", check.names=F,row.names =1)
+samplefile1 = fread("GSE93606_Sample_file.txt", header = TRUE, data.table = FALSE)
+exprSet1 = exprSet1[,samplefile1$Sample_Name]
+
+tcga_tmp = exprSet1
+rownames(samplefile1)=samplefile1$Sample_Name
+
+TSPYL2_exp = tcga_tmp[rownames(tcga_tmp) == "NIBAN3",]
+TSPYL2_exp = as.data.frame(t(TSPYL2_exp))
+
+TSPYL2_exp$Sample_Name = rownames(TSPYL2_exp)
+
+TSPYL2_exp1 = as.data.frame(TSPYL2_exp[rownames(samplefile1),])
+
+
+data2 = merge(TSPYL2_exp1, samplefile1, by="Sample_Name")
+data2$Sample_Group = as.factor(data2$Sample_Group)
+compaired <- list(c("IP", "HC")) 
+palette<-c(brewer.pal(7,"Set2")[c(1,2,4,5)])  colnames(data2)
+ggboxplot(data2, 
+          x = "Sample_Group", y = "NIBAN3", 
+          fill = "Sample_Group", palette = palette, 
+          add = "jitter", size = 0.5)+   
+  stat_compare_means(comparisons = compaired, 
+                     method = "wilcox.test",   
+                     symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns"))) 
+dev.off()
+
+library(pROC)
+library(ggplot2)
+
+SampleFile = samplefile1
+SampleFile = SampleFile[order(SampleFile$Sample_Group,decreasing = F),]
+SampleFile$Sample_Group = as.factor(SampleFile$Sample_Group)
+exprSet = exprSet1
+exprSet = exprSet[,match(SampleFile$Sample_Name,colnames(exprSet))]
+exprSet = as.data.frame(t(exprSet))
+exprSet$Sample_Group = SampleFile$Sample_Group; exprSet = exprSet[,c(ncol(exprSet),1:ncol(exprSet)-1)]
+data = exprSet
+
+BRCA=data
+res<-roc(Sample_Group~NIBAN3,data=BRCA,aur=TRUE,
+         ci=TRUE,          percent=TRUE, 
+         smooth=F,
+         levels=c('HC','IP'),direction=">"
+)
+
+
+p<- ggroc(res, color ="red",legacy.axes = TRUE)+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgrey", linetype=4)+
+  theme_bw() + 
+  ggtitle("NIBAN3 ROC Curve")+
+  theme(plot.title = element_text(hjust = 0.5,size = 16),
+        axis.text=element_text(size=12,colour = "black"),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14))
+
+p+annotate("text",x=0.75,y=0.25,label=paste("AUC = ", round(res$auc,3)))+
+  annotate("text",x=0.75,y=0.20,label=paste("95%CI: ", round(res$ci[1],3),'-',round(res$ci[3],3)))
+
+dev.off()
+#nomogram--------------------------------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("")
+load("")
+
+library(rms)
+library(nricens)
+library(foreign)
+library(rmda)
+library(regplot)
+brca_data <- as.data.frame(t(combat_exprSet))
+brca_data$Tumor_Sample_Barcode <- rownames(brca_data)
+
+clinical=read.table("combat_clinic.txt", header=T, sep="\t", check.names=F,row.names =NULL)
+
+colnames(clinical)
+brca_sur_data = clinical[,c(1,2,3,4)]colnames(brca_sur_data)[1] = "Tumor_Sample_Barcode"
+brca_sur_data <- merge(brca_sur_data, brca_data, by = 'Tumor_Sample_Barcode')
+rownames(brca_sur_data) = brca_sur_data$Tumor_Sample_Barcode
+brca_sur_data = brca_sur_data[, -1]
+data = brca_sur_data
+
+for (col_name in names(data)) {
+  cat("Unique values in", col_name, ":\n")   print(unique(data[[col_name]]))           cat("\n")}                           
+names(data)
+data$Gender <- factor(data$Gender, 
+                      levels = c(0, 1), 
+                      labels = c("Female", "Male"))
+str(data)
+
+
+ddist <- datadist(data)
+options(datadist = "ddist")
+
+fit <- lrm(IPF ~ Gender + Age	+ MMP9 +	FCMR +	
+             NIBAN3	, 
+           data = data,
+           x=T,y=T)
+
+print(summary(fit))
+nomogram <- regplot(
+  fit,
+  plots = c('violin', 'boxes'),   observation = data[2,],     
+  center = TRUE,                  subticks = TRUE,            
+  droplines = TRUE,             
+  title = 'Dynamic Nomogram',   
+  points = TRUE,                  odds = TRUE,                 
+  showP = TRUE,                   rank = 'sd',                  
+  interval = 'confidence',      
+  clickable = FALSE             
+)
+fit
+
+{
+
+model_logistic1 <- lrm(IPF ~ Gender, 		
+                         data=data,x=T,y=T)
+model_logistic2 <- lrm(IPF ~ Age,		
+                         data=data,x=T,y=T)
+model_logistic3 <- lrm(IPF ~ MMP9 +	FCMR +	
+                         NIBAN3 ,                     
+                         data = data,x=T,y=T)
+model_logistic4 <- lrm(IPF ~ Gender + Age	+ MMP9 +	FCMR +	
+                         NIBAN3,                       
+                       data = data,x=T,y=T)
+
+data$predvalue1<-predict(model_logistic1)
+data$predvalue2<-predict(model_logistic2)
+data$predvalue3<-predict(model_logistic3)
+data$predvalue4<-predict(model_logistic4)
+
+library(pROC)
+roc1 <- plot.roc(data$IPF, data$predvalue1,percent=TRUE, col="blue")
+roc2 <- lines.roc(data$IPF, data$predvalue2, percent=TRUE, col="green")
+roc3 <- lines.roc(data$IPF, data$predvalue3, percent=TRUE, col="yellow")
+roc4 <- lines.roc(data$IPF, data$predvalue4, percent=TRUE, col="red")
+roc1;roc2;roc3;roc4;
+plot(roc1,       print.auc=TRUE, 
+     print.auc.x=0.5, print.auc.y=15.0,      auc.polygon=TRUE,      auc.polygon.col="#DDDDDD",  
+     grid= FALSE, 
+     legacy.axes=TRUE) 
+plot.roc(roc2, add=TRUE, 
+         col = "#FA8072", 
+         print.auc=TRUE, 
+         print.auc.col = "#FA8072", 
+         print.auc.x=0.5, print.auc.y=10.0) 
+plot.roc(roc3, add=TRUE,           col = "#32CD32", 
+         print.auc=TRUE,          print.auc.col = "#32CD32",          print.auc.x=0.5, print.auc.y=5.0)  
+plot.roc(roc4, add=TRUE,           col = "red",          print.auc=TRUE, 
+         print.auc.col = "red",          print.auc.x=0.5, print.auc.y=0.5) 
+
+library(Hmisc)
+v<-validate(fit, method="boot", B=1000, dxy=T)
+Dxy = v[rownames(v)=="Dxy", colnames(v)=="index.corrected"]
+bias_corrected_c_index  <- abs(Dxy)/2+0.5
+bias_corrected_c_index
+cal1 <- calibrate(fit,                   
+                  method = "boot",                  
+                  m = 100,                             
+                  B = 1000)         
+plot(cal1,xlim=c(0,1.0),ylim=c(0,1.0))
+plot(cal1,     
+     xlim = c(0,1),     
+     ylim=c(0,1.0),     
+    xlab = "Predicted Probability",     
+    ylab="Observed  Probability",     
+    legend =F,        
+    subtitles = T,    abline(0,1,col="black",lty=2,lwd=2))
+lines(cal1[,c("predy","calibrated.orig")],
+      type="l",lwd=2,col="red",pch=16)
+lines(cal1[,c("predy","calibrated.corrected")],type="l",lwd=2,col="green",pch=16)
+    
+legend(0.55,0.4,      
+       c("Ideal","Apparent","Bias-corrected"),       
+       lty = c(2,1,1),       
+       lwd = c(2,1,1),       
+       col = c("black","red","green"),       
+       bty="n") 
+
+mtext("")
+box(lwd = 1) 
+
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("") 
+#combat------------------------------------------------------------
+exprSet1 <- read.table("GSE33566/GSE33566_gene_matrix.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+samplefile1 <- read.table("GSE33566/GSE33566_Sample_file.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+save(exprSet1, samplefile1, file = "1_GSE33566.rda")
+
+exprSet2 <- read.table("GSE132607/GSE132607_gene_matrix.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+samplefile2 <- read.table("GSE132607/GSE132607_Sample_file.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+save(exprSet2, samplefile2, file = "2_GSE132607.rda")
+
+exprSet3 <- read.table("GSE28042/GSE28042_gene_matrix.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+samplefile3 <- read.table("GSE28042/GSE28042_Sample_file.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+save(exprSet3, samplefile3, file = "3_GSE28042.rda")
+
+exprSet4 <- read.table("GSE93606/GSE93606_gene_matrix.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+samplefile4 <- read.table("GSE93606/GSE93606_Sample_file.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+save(exprSet4, samplefile4, file = "4_GSE93606.rda")
+
+load('1_GSE33566.rda')
+load('2_GSE132607.rda')
+load('3_GSE28042.rda')
+load('4_GSE93606.rda')
+
+common_gene <- Reduce(intersect, list(rownames(exprSet1), rownames(exprSet2),
+                                      rownames(exprSet3),rownames(exprSet4)))
+
+combined_exprSet <- cbind.data.frame(exprSet1[common_gene, ], exprSet2[common_gene, ],
+                                     exprSet3[common_gene, ], exprSet4[common_gene, ])
+
+combined_samplefile <- rbind.data.frame(cbind(samplefile1, Batch=rep("1_GSE33566_GPL6480",nrow(samplefile1))),
+                                        cbind(samplefile2, Batch=rep("2_GSE132607_GPL15207",nrow(samplefile2))),
+                                        cbind(samplefile3, Batch=rep("3_GSE28042_GPL6480",nrow(samplefile3))),
+                                        cbind(samplefile4, Batch=rep("4_GSE93606_GPL11532",nrow(samplefile4))))
+
+
+colnames(combined_samplefile)[2] = "Sample_Group"
+combat_samplefile = combined_samplefile
+combat_exprSet = combined_exprSet
+combat_exprSet = combat_exprSet[, match(combat_samplefile$Sample_Name, colnames(combat_exprSet))]
+library(FactoMineR)
+library(factoextra)
+dist_mat <- dist(t(combat_exprSet))
+combat_samplefile$Batch <- as.factor(combat_samplefile$Batch)
+pre.pca <- PCA(t(combat_exprSet),graph = FALSE)
+fviz_pca_ind(pre.pca,
+             geom= "point",
+             col.ind = combat_samplefile$Batch,
+             addEllipses = TRUE,
+             legend.title="Group")
+model <- model.matrix(~as.factor(combat_samplefile$Sample_Group))
+
+library("genefilter")
+library(sva)
+
+combat_exprSet <- ComBat(dat = combat_exprSet,batch = combat_samplefile$Batch,mod = model)
+combat.pca <- PCA(t(combat_exprSet),graph = FALSE)
+fviz_pca_ind(combat.pca,
+             geom= "point",
+             col.ind = combat_samplefile$Batch,
+             addEllipses = TRUE,
+             legend.title="Group"  )
+
+combat_samplefile = combat_samplefile[,c(1,2)]
+combat_samplefile = combat_samplefile[order(combat_samplefile$Sample_Group, decreasing = T), ]
+
+save(combat_exprSet, combat_samplefile, file = "step1_combat.rda")
+write.table(combat_samplefile, file = "combat_samplefile.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+#--------------------------------------------
+common_gene <- Reduce(intersect, list(rownames(exprSet1), rownames(exprSet2),
+                                      rownames(exprSet3),rownames(exprSet4)))
+
+combined_exprSet <- cbind.data.frame(exprSet1[common_gene, ], exprSet2[common_gene, ],
+                                     exprSet3[common_gene, ], exprSet4[common_gene, ])
+
+combined_samplefile <- rbind.data.frame(cbind(samplefile1, Batch=rep("1_GSE33566_GPL6480",nrow(samplefile1))),
+                                        cbind(samplefile2, Batch=rep("2_GSE132607_GPL15207",nrow(samplefile2))),
+                                        cbind(samplefile3, Batch=rep("3_GSE28042_GPL6480",nrow(samplefile3))),
+                                        cbind(samplefile4, Batch=rep("4_GSE93606_GPL11532",nrow(samplefile4))))
+
+
+
+colnames(combined_samplefile)[2] = "Sample_Group
+
+combat_samplefile = combined_samplefile
+combat_exprSet = combined_exprSet
+combat_exprSet = combat_exprSet[, match(combat_samplefile$Sample_Name, colnames(combat_exprSet))]
+
+save(combat_exprSet, combat_samplefile, file = "step1_1.rda")
+library(pheatmap)
+c <- cor(combat_exprSet, method = "spearman") #Pearson
+pheatmap(c)
+tmp1 <- combat_exprSet[, rowMeans(c) > 0.7]
+c1 <- cor(tmp1, method = "spearman")
+pheatmap(c1)
+setdiff(colnames(combat_exprSet), colnames(tmp1))
+
+combat_exprSet = combat_exprSet[,colnames(tmp1)]
+combat_samplefile = combat_samplefile[match(colnames(combat_exprSet), combat_samplefile$Sample_Name),]
+
+save(combat_exprSet, combat_samplefile, file = "step1_combat.rda")
+
+write.table(combat_exprSet, file = "combat_exprSet.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = TRUE)
+write.table(combat_samplefile, file = "combat_samplefile.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = TRUE)
+#ConsensusClusterPlus--------------------------------------------------
+load("step1_combat.rda")
+Intersect <- read.table("Intersect.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+
+Inter_exp1 = combat_exprSet[,combat_samplefile$Sample_Group == "IP"]
+
+Inter_exp = na.omit(Inter_exp1[Intersect$Intersect,])
+
+library(ConsensusClusterPlus)
+ccp.input = as.matrix(Inter_exp)
+ccp.input = sweep(as.matrix(ccp.input), 1, apply(as.matrix(ccp.input), 1, median, na.rm=TRUE))
+
+results = ConsensusClusterPlus(ccp.input,
+                               maxK=6, reps=1000, pItem=0.8, pFeature=1, clusterAlg="km",
+                               innerLinkage = "ward.D", finalLinkage = "ward.D",
+                               distance="euclidean", seed=1234, plot="pdf", writeTable=TRUE)
+#pam euclidean
+#hc pearson/spearman
+#km  euclidean
+
+Kvec = 2:6
+x1 = 0.1; x2 = 0.9
+PAC = rep(NA,length(Kvec))
+names(PAC) = paste("K=", Kvec, sep="")
+for(i in Kvec){
+  M = results[[i]]$consensusMatrix
+  Fn = ecdf(M[lower.tri(M)])
+  PAC[i-1] = Fn(x2) - Fn(x1)}
+rcc.ind = Kvec[which.min(PAC)]
+rcc.ind
+#group
+group <- results[[rcc.ind]]$consensusClass; table(group)
+samorder = sort(results[[rcc.ind]]$consensusClass)
+samplefile <- data.frame("Subtype" = ifelse(samorder == 1,"cluster1", "cluster2"),
+                         row.names = names(samorder), check.names = F, stringsAsFactors = F)
+
+samplefile = as.data.frame(cbind(Sample_Name = rownames(samplefile), samplefile))
+
+samplefile$Subtype = factor(samplefile$Subtype)
+table(samplefile$Subtype)
+exprSet = as.data.frame(ccp.input[, match(samplefile$Sample_Name, colnames(ccp.input))])
+save(results, exprSet, combat_exprSet, samplefile,file = "step2_km.rda")
+
+load("step2_km.rda")
+#PCA------------------------------------------------------
+load("step2_km.rda")
+library(ggplot2)
+library(plyr)
+#library(devtools)
+library(ggord)
+data = exprSet
+rownames(data) = gsub("-", " ", rownames(data))
+rownames(data) = gsub(" ", "", rownames(data))
+source('geom_ord_ellipse.R') pca.results <- prcomp(t(data), center = TRUE, scale. = FALSE)
+mycol <- c("#008ECB","#EA921D","#D14039")
+
+ggord(pca.results, grp_in = samplefile$Subtype, repel=TRUE,
+      alpha = 0.6, ellipse_pro = 0.99, size = 2,
+      cols = mycol[1:length(unique(samplefile$Subtype))],
+      arrow=0, vec_ext = 0, veccol="brown", txt=0) +
+  theme(panel.grid =element_blank()) +
+  geom_ord_ellipse(ellipse_pro = .98, color='darkgrey', size=0.5, lty=2 ) +
+  geom_ord_ellipse(ellipse_pro = .98, size=0.5, lty=2)
+dev.off()
+
+#heatmap-----------------------------------------------------------------
+library(pheatmap)
+data1 = exprSet
+
+annCol <- data.frame("Gene cluster" = samplefile$Subtype, row.names = samplefile$Sample_Name, check.names = F, stringsAsFactors = F)
+annColors <- list("cluster" = c("A" = "#008ECB", "B" = "#EA921D", "C" = "#D14039")) #, "Signature gene" = c("A" = "#D14039", "B" = "#008ECB"))
+plotdata <- data1[, rownames(annCol)]
+plotdata <- t(scale(t(plotdata)))
+plotdata[plotdata > 1] <- 1
+plotdata[plotdata < -1] <- -1
+
+pheatmap(plotdata, color=colorRampPalette(c("#343493", "white", "#C24A45"))(80), border_color=NA,
+         annotation_col=annCol, annotation_colors = annColors,
+         #scale="row",
+         cluster_row=, cluster_cols=F, show_colnames=F, show_rownames=T,
+         clustering_distance_cols = "euclidean", clustering_method = "complete")
+dev.off()
+
+#cibersort----------------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("")
+load("step2_km.rda")
+load("step1_combat.rda")
+library(ggplot2) 
+library(RColorBrewer) 
+library(ggpubr)
+library(preprocessCore)
+library(e1071)
+library(parallel)
+source("CIBERSORT.R") 
+combat_exprSet1 = combat_exprSet[ ,samplefile$Sample_Name]
+sig_matrix <- "LM22.txt"
+write.table(cbind(rownames(combat_exprSet1), combat_exprSet1), file="cibersort.txt", sep="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+mixture_file = 'cibersort.txt'
+res_cibersort <- CIBERSORT(sig_matrix, mixture_file, perm=100, QN=TRUE)
+res_cibersort = read.table("CIBERSORT-Results.txt",sep="\t",header=T,row.names=1,check.names=F) 
+res_cibersort = res_cibersort[, -23:-25]
+res_cibersort = res_cibersort[,colSums(res_cibersort)>0]
+save(res_cibersort, file = "res_cibersort_km.rda")
+data1 = as.data.frame(res_cibersort)
+data1$Sample_Name = rownames(data1)
+data2 = merge(data1, samplefile, by="Sample_Name")
+write.table(data2, file="data2.txt", sep="\t", quote=FALSE, row.names=FALSE, col.names=TRUE)
+
+samplefile$Subtype = factor(samplefile$Subtype, levels = c("cluster1","cluster2"))
+res_cibersort$Sample_Name = rownames(res_cibersort)
+samplefile$Sample_Name = rownames(samplefile)
+res_cibersort = merge(samplefile[,c("Sample_Name","Subtype")], res_cibersort, by="Sample_Name")
+library(ggpubr)
+library(tidyr)
+long_dat <- pivot_longer(res_cibersort, cols=3:ncol(res_cibersort), names_to="Gene", values_to = "Expression")
+
+ggboxplot(long_dat, x="Gene", y="Expression", fill="Subtype",
+          xlab="",
+          ylab="Gene expression",
+          legend.title="Gene",
+          width=0.8,
+          palette = c("#008ECB", "#EA921D") )+
+  rotate_x_text(50)+
+  stat_compare_means(aes(group=Subtype),
+                     method="wilcox.test",
+                     symnum.args=list(cutpoints=c(0, 0.001, 0.01, 0.05, 1), symbols=c("***", "**", "*", "")), label="p.signif")
+dev.off()
+# ssGSEA--------------------------
+library(tidyverse)
+library(data.table)
+library(GSVA)
+library(ggsci)
+library(tidyr)
+library(ggpubr)
+cellMarker <- data.table::fread("cellMarker.csv",data.table = F)
+colnames(cellMarker)[2] <- "celltype"
+
+type <- split(cellMarker,cellMarker$celltype)
+cellMarker <- lapply(type, function(x){
+  dd = x$Metagene
+  unique(dd)
+})
+
+gsva_data <- gsva(combat_exprSet,cellMarker, method = "ssgsea")
+data <- gsva_data %>% t() %>% as.data.frame()
+samplefile$Subtype = factor(samplefile$Subtype, levels = c("cluster1","cluster2"))
+data$Sample_Name = rownames(data)
+samplefile$Sample_Name = rownames(samplefile)
+ssGSEA = merge(samplefile[,c("Sample_Name","Subtype")], data, by="Sample_Name")
+library(ggpubr)
+library(tidyr)
+long_dat <- pivot_longer(ssGSEA, cols=3:ncol(ssGSEA), names_to="Gene", values_to = "Expression")
+
+ggboxplot(long_dat, x="Gene", y="Expression", fill="Subtype",
+          xlab="",
+          ylab="Gene expression",
+          legend.title="Gene",
+          width=0.8,
+          palette = c("#008ECB", "#EA921D") )+
+  rotate_x_text(50)+
+  stat_compare_means(aes(group=Subtype),
+                     method="wilcox.test",
+                     symnum.args=list(cutpoints=c(0, 0.001, 0.01, 0.05, 1), symbols=c("***", "**", "*", "")), label="p.signif")
+dev.off()
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+library(dplyr)
+
+lm22.file <- "LM22.txt"
+rawdata_file.file<-"TCGA deg_fpkm.tsv"
+cibersort_file <- "TCGA cibersort.txt"
+library('CIBERSORT')
+TCGA_TME.results <- CIBERSORT(lm22.file ,rawdata_file.file, perm = 50, QN = F)
+TCGA_TME.results
+write.csv(TCGA_TME.results, "TCGA_CIBERSORT_Results_fromRcode.csv")
+
+
+
+data <- t(TCGA_TME.results[,-c(9:11)])
+col=rainbow(nrow(data),s=0.85,v=0.85)
+df.long <- reshape2::melt(data, value.name='abundance', variable.name='group')
+
+
+ggplot(df.long, aes(x=Var2, y=abundance, group=Var1)) +
+  theme_classic()+
+  geom_bar(stat="identity", position="fill", aes(fill=Var1))+
+  scale_y_continuous(labels = scales::percent) +
+  labs(x='',y='Relative Percent',title='Immune Cell Subset Proportions')+
+  scale_fill_manual(values =col)+
+  theme( panel.grid=element_blank(),legend.title=element_blank(),
+         plot.title = element_text(hjust = 0.5),
+         axis.text.x = element_text(angle =90))
+#checkpoints-------------------------------------------------------
+setwd("")
+library(ggplot2) 
+library(RColorBrewer) 
+library(ggpubr)
+library(preprocessCore)
+library(e1071)
+library(parallel)
+library(data.table)
+
+load("step2_km.rda")
+load("step1_combat.rda")
+tcga_tmp = combat_exprSet
+rownames(samplefile)=samplefile$Sample_Name
+
+TSPYL2_exp = tcga_tmp[rownames(tcga_tmp) == "BTLA",] 
+TSPYL2_exp = as.data.frame(t(TSPYL2_exp))
+rownames(TSPYL2_exp) = "TNFSF9"
+TSPYL2_exp = as.data.frame(t(TSPYL2_exp))
+
+TSPYL2_exp$Sample_Name = rownames(TSPYL2_exp)
+
+TSPYL2_exp1 = as.data.frame(TSPYL2_exp[rownames(samplefile),])
+
+data2 = merge(TSPYL2_exp1, samplefile, by="Sample_Name")
+data2$Subtype = as.factor(data2$Subtype)
+compaired <- list(c("cluster1", "cluster2"))  
+palette<-c(brewer.pal(7,"Set2")[c(1,2,4,5)])   
+colnames(data2)
+ggboxplot(data2, 
+          x = "Subtype", y = "TNFSF4", 
+          fill = "Subtype", palette = palette, 
+          add = "jitter", size = 0.5)+    
+ stat_compare_means(comparisons = compaired, 
+                     method = "wilcox.test",  
+                     symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns"))) 
+dev.off()
+
+
+load("step2_km.rda") 
+load("step1_combat.rda") 
+cp_gene <- read.table(file = "checkpoint.txt", sep="\t", row.names = 1, header = TRUE)
+raw_data_cp = as.data.frame(t(combat_exprSet))
+raw_data_cp = raw_data_cp[samplefile$Sample_Name,]
+
+raw_data_cp = as.data.frame(t(raw_data_cp))
+
+data_cp = raw_data_cp[rownames(raw_data_cp) , ]
+
+tmp = c("CD226","CD27","CD28","CD40","CD40LG","CEACAM1","CTLA4","HLA-B","HLA-DPB1","HLA-DRA","ICOS","SIRPA","TIGIT","TNFSF14","HLA-E","BTLA","HLA-A","HLA-DMB","HLA-DOA","HLA-DQA1","CD160","IDO1","BTN3A1","BTN2A2","BTN2A1")
+
+data_cp = raw_data_cp[rownames(raw_data_cp)%in% tmp,]
+
+data_cp = as.data.frame(t(data_cp))
+data_cp$Sample_Name = rownames(data_cp)
+
+samplefile$Subtype = factor(samplefile$Subtype, levels = c("cluster1","cluster2"))
+samplefile$Sample_Name = rownames(samplefile)
+data_cp = merge(samplefile[,c("Sample_Name","Subtype")], data_cp, by="Sample_Name")
+
+library(ggpubr)
+library(tidyr)
+long_dat <- pivot_longer(data_cp, cols=3:ncol(data_cp), names_to="Gene", values_to = "Expression")
+long_dat$Subtype = factor(long_dat$Subtype)
+ggboxplot(long_dat, x="Gene", y="Expression", fill="Subtype",
+          xlab="",
+          ylab="Gene expression",
+          legend.title="Gene",
+          width=0.8,
+          palette = c("#008ECB", "#EA921D") )+
+  rotate_x_text(50)+
+  stat_compare_means(aes(group=Subtype),
+                     method="wilcox.test",
+                     symnum.args=list(cutpoints=c(0, 0.001, 0.01, 0.05, 1), symbols=c("***", "**", "*", "")), label="p.signif")
+dev.off()
+#GSVA----------------------------------------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("") 
+
+load("step2_km.rda") 
+load("step1_combat.rda")
+CRC <- read.table("combat_raw_data.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+SampleFile=samplefile
+exprSet = CRC
+exprSet = exprSet[,match(SampleFile$Sample_Name,colnames(exprSet))]write.table(exprSet, file="GSVA.txt", sep="\t", quote=FALSE, row.names=T, col.names=TRUE)
+
+setwd("")
+inputFile="GSVA.txt"
+gmtFile="c5.all.v2023.1.Hs.symbols.gmt"
+
+library(GSVA)
+library(limma)
+library(GSEABase)
+rt <- read.table("GSVA.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+mat=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+mat=avereps(mat)
+mat=normalizeBetweenArrays(mat)
+
+c3gsc2=getGmt( gmtFile, 
+               collectionType=BroadCollection(category="c5"), 
+               geneIdType=SymbolIdentifier())
+gsvaOut=gsva(mat, 
+             c3gsc2, 
+             min.sz=10, 
+             max.sz=500, 
+             verbose=TRUE,
+             parallel.sz=1)
+gsvaOut=rbind(id=colnames(gsvaOut),gsvaOut)
+write.table(gsvaOut,file="GSVAOut.txt",sep="\t",quote=F,col.names=F)
+
+library(limma)
+
+rt=read.table("GSVAOut.txt",sep="\t",header=T,check.names=F,row.names=1)
+
+logFCcutoff=0.2
+adjPvalueCutoff=0.05
+#Cluster 1
+type=c( rep("cluster1",159),rep("cluster2",139) )   design=model.matrix(~ type)
+colnames(design)=c("cluster1", "cluster2")
+fit=lmFit(rt, design)
+fit=eBayes(fit)
+
+all=topTable(fit, coef="cluster1", number=Inf,adjust.method="holm")
+all=rbind(id=colnames(all),all)
+write.table(all,file="go_all.txt",sep="\t",quote=F,col.names=F)
+
+diff <- topTable(fit, coef="cluster1", number=Inf,
+                 p.value=adjPvalueCutoff, adjust="holm", lfc=logFCcutoff)
+diffName=row.names(diff)
+diff=rbind(id=colnames(diff),diff)
+write.table(diff,file="go_diff.xls",sep="\t",quote=F,col.names=F)
+
+hmExp=rt[diffName,]
+hmExp=rbind(id=colnames(hmExp),hmExp)
+write.table(hmExp,file="go_heatmap.txt",sep="\t",quote=F,col.names=F)
+
+logFoldChange=0.2                                    
+adjustP=0.05
+
+rt=read.table("go_all.txt",sep="\t",header=T,check.names=F)                  
+
+tiff(file="vol.tiff",
+     width = 13,           
+     height =13,                units ="cm",
+     compression="lzw",
+     bg="white",
+     res=300) 
+yMax=10      
+xMax=0.3    
+plot(rt$logFC,-log10(rt$adj.P.Val), ylab="-log10(adj.P.Val)",xlab="logFC",
+     main="Volcanoh", ylim=c(0,yMax),xlim=c(-xMax,xMax),yaxs="i",pch=20, cex=1)  
+diffSub=subset(rt, adj.P.Val<adjustP & logFC>logFoldChange)
+points(diffSub$logFC,-log10(diffSub$adj.P.Val), pch=20, col="red",cex=2)
+diffSub=subset(rt, adj.P.Val<adjustP & logFC<(-logFoldChange))
+points(diffSub$logFC, -log10(diffSub$adj.P.Val), pch=20, col="green",cex=2)
+abline(v=0,lty=2,lwd=3)
+dev.off()
+
+rt=read.table("go_heatmap.txt",sep="\t",header=T,row.names=1,check.names=F)
+
+library(pheatmap)
+Type=c(rep("cluster1",159),rep("cluster2",139))    
+names(Type)=colnames(rt)
+Type=as.data.frame(Type)
+
+tiff(file="hheatmap0.1.tiff",
+     width = 20,                 height =20,                units ="cm",
+     compression="lzw",
+     bg="white",
+     res=600)
+pheatmap(rt, 
+         annotation=Type, 
+         color = colorRampPalette(c("#2f5688", "#BBBBBB", "#CC0000"))(50),
+         cluster_cols =F,
+         fontsize = 6,
+         fontsize_row=3,            fontsize_col=5)
+dev.off()
+#-----------------------------------------------
+load("nmf.rda")
+load("STAD.rda")
+KEGG <- read.table("ITIH3_goGSVAOut.txt", header = TRUE, sep = "\t", row.names = 1, check.names = FALSE)
+KEGG1 = as.data.frame(t(KEGG))
+
+exprSet=as.data.frame(STAD)
+group <- read.table("ITIH3samplefile.txt", header = TRUE, sep = "\t", row.names = 1, check.names = FALSE)
+
+group_colors=list(type=c(clusterA = "#EF767A", clusterB = "#456990", clusterC = "#48C0AA"))
+
+library(pheatmap)
+mycol1<-colorRampPalette(c("navy", "white", "orange"))(100)
+exprSet = exprSet[apply(exprSet, 1, function(x) sd(x)!=0),] 
+p <- pheatmap(exprSet,scale="row",
+              fontsize = 6,
+              fontsize_row = 6,
+              fontsize_col = 7,
+              cellwidth = 25,
+              cellheight = 6,
+              color = mycol1,
+              border="white",
+              treeheight_col=30,
+              cluster_cols = F,
+              gaps_col=c(3,6),
+              cutree_rows=3,
+              annotation_col=group,
+              annotation_color=group_colors)
+
+
+clu <- p$tree_row
+cluster <- factor(cutree(clu,4))
+cluster
+cut.df <- data.frame(cluster)
+plot(clu,hang = -1,cex=0.6,axes=FALSE,ann=FALSE)
+
+pheatmap(exprSet,scale="row",
+         fontsize = 6,
+         fontsize_row = 6,
+         fontsize_col = 7,
+         cellwidth = 1,
+         cellheight = 6,
+         color = mycol1,
+         border="white",
+         treeheight_col=30,
+         cluster_cols = F,
+         cutree_cols=3,
+         cutree_rows=4,
+         annotation_col=group,
+         annotation_row =cut.df,
+         annotation_color=group_colors)
+dev.off()
+#--------------------------------------------------
+raw_data1 = combat_exprSet1
+library(data.table)
+immune_dat = fread('immport_pathway.txt', sep = '\t', header=TRUE, data.table=FALSE)
+patyMarker <- lapply(split(immune_dat, immune_dat$Category), function(x){unique(x$Symbol)})
+for(i in names(patyMarker)){
+  patyMarker[[i]] = unique(patyMarker[[i]])
+}
+
+library(GSVA)
+gsva_data1 <- gsva(as.matrix(raw_data1), patyMarker, method="ssgsea")
+
+normalize = function(x){return((x-min(x))/(max(x)-min(x)))}
+gsva_data1 = normalize(gsva_data1)
+gsva_data1 = as.data.frame(t(gsva_data1))
+
+gsva_data1$Sample_Name = rownames(gsva_data1)
+samplefile$Subtype = factor(samplefile$Subtype, levels = c("cluster1","cluster2"))
+
+write.table(gsva_data1, file = "gsva_data1.txt", quote = FALSE, sep = "\t", col.names = TRUE, row.names = T)
+gsva_data1<-read.table('gsva_data1.txt',sep='\t',header = T,row.names = 1,check.names = F)
+gsva_data1 = merge(samplefile[,c("Sample_Name","Subtype")], gsva_data1, by="Sample_Name")
+
+library(ggpubr)
+library(tidyr)
+long_dat <- pivot_longer(gsva_data1, cols=3:ncol(gsva_data1), names_to="Gene", values_to = "Expression")
+ggboxplot(long_dat, x="Gene", y="Expression", fill="Subtype",
+          xlab="",
+          ylab="Gene expression",
+          legend.title="Gene",
+          width=0.8,
+          palette = c("#0066FF","#FF0000") )+
+  rotate_x_text(60)+
+  stat_compare_means(aes(group=Subtype),
+                     method="wilcox.test",
+                     symnum.args=list(cutpoints=c(0, 0.001, 0.01, 0.05, 1), symbols=c("***", "**", "*", " ")), label="p.signif")
+dev.off()
+
+# Xcell----------------------------------------------------------
+library(ConsensusClusterPlus)
+library(xCell)
+res_xcell <- xCellAnalysis(combat_exprSet1)
+res_xcell <- as.data.frame(res_xcell)
+table(rowSums(res_xcell)>0)
+res_xcell1 <- res_xcell[-65:-67,]
+
+data3 = t(as.data.frame(res_xcell1))
+data3 <- as.data.frame(data3)
+data3$Sample_Name = rownames(data3)
+data4 = merge(data3, samplefile, by="Sample_Name")
+
+write.table(data4, file = "data4.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = TRUE)
+data5 = raw_data <- read.table(file = "data4.txt", header=T, sep="\t", check.names=F,row.names =1)
+
+compaired <- list(c("clusterA", "clusterB"),c("clusterA","clusterC"),c("clusterB","clusterC") )  
+
+palette<-c(brewer.pal(7,"Set2")[c(1,2,4,5)])  
+colnames(data2)
+ggboxplot(data2, 
+          x = "Subtype", y = "Macrophages M2", 
+          fill = "Subtype", palette = palette, 
+          add = "jitter", size = 0.5)+    
+  stat_compare_means(comparisons = compaired, 
+                     method = "wilcox.test",    
+                     symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                                      symbols = c("***", "**", "*", "ns"))) 
+dev.off()
+
+#-----------------------------------------------
+load("step2_km.rda")
+load("step1_combat.rda")
+library(limma)
+new_exprSet = as.data.frame(normalizeBetweenArrays(as.matrix(combat_exprSet), method = "quantile")) 
+new_exprSet = new_exprSet[,samplefile$Sample_Name]
+samplefile$Subtype = factor(samplefile$Subtype, levels = c("cluster1", "cluster2"))
+design = model.matrix(~ 0 + samplefile$Subtype)
+colnames(design) = levels(samplefile$Subtype)
+contrast.matrix = makeContrasts("cluster2-cluster1", levels = design)
+deg = function(exprSet, design, contrast.matrix, coef){
+  fit = lmFit(exprSet, design)
+  library(futile.logger)
+  fit2 = contrasts.fit(fit, contrast.matrix)
+  fit2 = eBayes(fit2)
+  tepmOutput = topTable(fit2, coef = coef, adjust.method = "fdr", number = 50000)
+  nrDEG = na.omit(tepmOutput)
+  return(nrDEG)
+  
+}
+nrDEG1 = deg(new_exprSet, design, contrast.matrix, coef = 1)
+nrDEG1 <- as.data.frame(nrDEG1)
+nrDEG1 <- cbind(rownames(nrDEG1), nrDEG1)
+colnames(nrDEG1)[1] <- "gene_symbol"
+
+nrDEG1_all <- nrDEG1[which(nrDEG1$adj.P.Val < 0.05 & abs(nrDEG1$logFC) >= 0.58), ]
+nrDEG1_all[which(nrDEG1_all$logFC > 0), "group"] <- "up"
+nrDEG1_all[which(nrDEG1_all$logFC < 0), "group"] <- "down"
+table(nrDEG1_all$group)
+write.table(nrDEG1_all, file = ".txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+save(combat_exprSet, samplefile, nrDEG1, nrDEG1_all, file = "step3_DEG0.58_KM.rda")
+
+library(msigdbr)
+library(dplyr)
+library(data.table)
+library(GSVA)
+library(limma)
+library(stringr)
+library(ggplot2)
+
+h <- msigdbr(species = "Homo sapiens", category = "C7") 
+
+h <- select(h, gs_name, gene_symbol) %>% #或entrez_gene
+  as.data.frame %>% 
+  split(., .$gs_name) %>% 
+  lapply(., function(x)(x$gene_symbol)) #或entrez_gene
+gs <- lapply(h, unique)
+
+count <- table(unlist(gs))
+keep <- names(which(table(unlist(gs)) < 2))
+gs <- lapply(gs, function(x) intersect(keep, x))
+
+gs <- gs[lapply(gs, length) > 0]
+
+raw_data1 = new_exprSet
+raw_data1 = raw_data1[,rownames(samplefile)]
+exprSet1 = raw_data1[nrDEG1_all[nrDEG1_all$group != "no sig",]$gene_symbol,]
+gsym.expr <- exprSet1
+head(gsym.expr)
+gsva_es <- gsva(as.matrix(gsym.expr), gs)
+group_list <- samplefile
+design <- model.matrix(~ 0 + factor(samplefile$Subtype))
+colnames(design) <- levels(factor(samplefile$Subtype))
+rownames(design) <- colnames(gsva_es)
+head(design)
+
+contrast.matrix <- makeContrasts(cluster1-cluster2, levels = design)
+
+fit <- lmFit(gsva_es, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+x <- topTable(fit2, coef = 1, n = Inf, adjust.method = "BH", sort.by = "P")
+head(x)
+
+pathway <- str_replace(row.names(x), "C2", "")
+df <- data.frame(ID = pathway, score = x$t)
+cutoff <- 1
+df$group <- cut(df$score, breaks = c(-Inf, -cutoff, cutoff, Inf),labels = c(1,2,3))
+
+sortdf <- df[order(df$score),]
+sortdf$ID <- factor(sortdf$ID, levels = sortdf$ID)
+head(sortdf)
+
+write.table(sortdf, file = "sortdf_KEGG.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = T)
+ggplot(sortdf, aes(ID, score, fill = group)) + geom_bar(stat = 'identity') + 
+  coord_flip() + 
+  scale_fill_manual(values = c('palegreen3', 'snow3', '#EA921D'), guide = FALSE) + 
+
+  geom_hline(yintercept = c(-cutoff,cutoff), 
+             color="white",
+             linetype = 2, 
+             size = 0.4) + 
+  
+  geom_text(data = subset(df, score < 0),
+            aes(x=ID, y= 0, label= paste0(" ", ID), color = group),
+            size = 3, 
+            hjust = "inward" ) +  
+  geom_text(data = subset(df, score > 0),
+            aes(x=ID, y= -0.1, label=ID, color = group),
+            size = 3, hjust = "outward") +  
+  scale_colour_manual(values = c("black","snow3","black"), guide = FALSE) + 
+  
+  xlab("") +ylab("t value of GSEA score")+
+  theme_bw() +
+  theme(panel.grid =element_blank()) + 
+  theme(panel.border = element_rect(size = 0.6)) + 
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank()) 
+dev.off()
+#--------------------------------------------
+load("step2_km.rda")
+load("res_cibersort_km.rda")
+library(ggplot2)
+library(ggpubr)
+library(ggExtra)
+
+res_cibersort1 = as.data.frame(t(res_cibersort))
+write.table(res_cibersort1, file = "res_cibersort_km.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = T)
+res_cibersort1 <- read.table("res_cibersort_km.txt", header=TRUE, row.names=1, quote="", sep="\t", check.names = FALSE)
+rownames(res_cibersort1)
+gene1="MMP9"             gene2="Neutrophils"  
+#gene2="Eosinophils" 
+
+
+x=as.numeric(exprSet[gene1,])
+y=as.numeric(res_cibersort1[gene2,])
+
+df1=as.data.frame(cbind(x,y))
+corT=cor.test(x,y,method="spearman")
+cor=corT$estimate
+pValue=corT$p.value
+p1=ggplot(df1, aes(x, y)) + 
+  xlab(gene1)+ylab(gene2)+
+  geom_point()+ geom_smooth(method="lm",formula = y ~ x) + theme_bw()+
+  stat_cor(method = 'spearman', aes(x =x, y =y))
+p1
+p2=ggMarginal(p1, type = "density", xparams = list(fill = "orange"),yparams = list(fill = "blue"))
+p2
+#----------------
+load("step2_km.rda")
+load("res_cibersort_第一次分型km.rda")
+exp1=as.data.frame(t(combat_exprSet))
+exp=exp1[samplefile$Sample_Name,]
+exp=as.data.frame(t(exp))
+
+library(limma)
+library(ggplot2)
+library(ggpubr)
+library(ggExtra)
+library(dplyr)
+library(ConsensusClusterPlus)
+library(xCell)
+res_xcell <- xCellAnalysis(exp)
+res_xcell <- as.data.frame(res_xcell)
+table(rowSums(res_xcell)>0)
+res_xcell1 <- res_xcell[-65:-67,]
+
+exprSet3 = exp       
+exprSet3 = t(exprSet3)
+gene <- "NIBAN3"     #FCMR,NIBAN3
+y <- as.numeric(exprSet3[,gene])
+
+res_xcell2 = as.data.frame(t(res_xcell1))  
+cor_data <- do.call(rbind,lapply(colnames(res_xcell2),function(x){
+  dd <- cor.test(as.numeric(res_xcell2[,x]),y,method ="spearman",exact=FALSE)
+  data.frame(cell=x,cor=dd$estimate,p.value=dd$p.value)
+}))
+
+p.col = c('gold','pink','orange','LimeGreen','darkgreen')
+fcolor = function(x,p.col){
+  color = ifelse(x>0.8,p.col[1],ifelse(x>0.6,p.col[2],ifelse(x>0.4,p.col[3],
+                                                             ifelse(x>0.2,p.col[4], p.col[5])
+  )))
+  return(color)
+}
+
+p.cex = seq(2.5, 5.5, length=5)
+fcex = function(x){
+  x=abs(x)
+  cex = ifelse(x<0.1,p.cex[1],ifelse(x<0.2,p.cex[2],ifelse(x<0.3,p.cex[3],
+                                                           ifelse(x<0.4,p.cex[4],p.cex[5]))))
+  return(cex)
+}
+
+dat <- cor_data
+gene <- 'NIBAN3'
+
+points.color = fcolor(x=dat$p.value,p.col=p.col)
+dat$points.color = points.color
+
+points.cex = fcex(x=dat$cor)-0.8
+dat$points.cex = points.cex
+dat=dat[order(dat$cor),]
+
+xlim = ceiling(max(abs(dat$cor))*10)/10         
+pdf(file="NIBAN3.pdf", width=12, height=12)      
+layout(mat=matrix(c(1,1,1,1,1,0,2,0,3,0),nc=2),width=c(8,2.2),heights=c(1,2,1,2,1))
+par(bg="white",las=1,mar=c(5,18,2,4),cex.axis=1.5,cex.lab=2)
+plot(1,type="n",xlim=c(-xlim,xlim),ylim=c(0.5,nrow(dat)+0.5),xlab="Correlation Coefficient",ylab="",yaxt="n",yaxs="i",axes=F)
+rect(par('usr')[1],par('usr')[3],par('usr')[2],par('usr')[4],col="#F5F5F5",border="#F5F5F5")
+grid(ny=nrow(dat),col="white",lty=1,lwd=2)
+
+segments(x0=dat$cor,y0=1:nrow(dat),x1=0,y1=1:nrow(dat),lwd=4)
+
+points(x=dat$cor,y = 1:nrow(dat),col = dat$points.color,pch=16,cex=dat$points.cex)+
+  scale_size_continuous(range =c(2,4))
+
+text(par('usr')[1],1:nrow(dat),dat$cell,adj=1,xpd=T,cex=1.5)
+pvalue.text=ifelse(dat$p.value<0.001,'<0.001',sprintf("%.03f",dat$p.value))
+redcutoff_cor=0
+redcutoff_pvalue=0.05
+text(par('usr')[2],1:nrow(dat),pvalue.text,adj=0,xpd=T,col=ifelse(abs(dat$cor)>redcutoff_cor & dat$p.value<redcutoff_pvalue,"red","black"),cex=1.5)
+axis(1,tick=F)
+
+par(mar=c(0,4,3,4))
+plot(1,type="n",axes=F,xlab="",ylab="")
+legend("left",legend=c(0.1,0.2,0.3,0.4,0.5),col="black",pt.cex=p.cex,pch=16,bty="n",cex=2,title="abs(cor)")
+
+par(mar=c(0,6,4,6),cex.axis=1.5,cex.main=2)
+barplot(rep(1,5),horiz=T,space=0,border=NA,col=p.col,xaxt="n",yaxt="n",xlab="",ylab="",main="pvalue")
+axis(4,at=0:5,c(1,0.8,0.6,0.4,0.2,0),tick=F)
+dev.off()
+
+#diagnostic models--------------------------------------
+rm(list=ls())
+options(stringsAsFactors = F)
+setwd("")
+Intersect <- read.table("Intersect.txt", header=TRUE, row.names=NULL, quote="", sep="\t", check.names = FALSE)
+load("step1_combat.rda")
+data=t(combat_exprSet[Intersect$Intersect,])
+data1=as.data.frame(data)
+data1$Sample_Name = rownames(data1)
+
+samplefile=combat_samplefile
+data2 = merge(data1, samplefile, by="Sample_Name")
+rownames(data2)= data2$Sample_Name
+data2=data2[,-1]
+data3=data2[,c(10,1:9)]
+colnames(data3)[1] = "group"
+
+library(caret)
+set.seed(1234)
+train_dat = data3
+inTrain = createDataPartition(data3$group, p = 8/10, list = FALSE)
+train_dat = data3[inTrain, ]
+test_dat = data3[-inTrain, ]
+
+library(e1071)
+set.seed(1234)
+train_ctrl = trainControl(method="repeatedcv", number=10, repeats=10, classProbs=TRUE, summaryFunction=twoClassSummary, allowParallel=TRUE)
+svm.model = train(group ~ ., data=train_dat, method="svmLinear", metric="ROC", trControl=train_ctrl)
+print(svm.model)
+
+pred1 <- predict(svm.model, newdata=train_dat[, -1], by="class")
+table(pred1, train_dat$group)
+mean(pred1 == train_dat$group)
+
+pred1 <- predict(svm.model, newdata=test_dat[, -1], by="class")
+table(pred1, test_dat$group)
+mean(pred1 == test_dat$group
+
+save(train_dat,test_dat,file = "ml_dat.rda")
+save(svm.model, file = "svm.rda")
+#RF--------------------------------------------------
+set.seed(1234)
+library(caret)
+train_ctrl = trainControl(method="repeatedcv", number=10, repeats=10, classProbs=TRUE, summaryFunction=twoClassSummary, allowParallel=TRUE)
+rf.model = train(group ~ ., data=train_dat, method="rf", metric="ROC", trControl=train_ctrl)
+print(rf.model)
+
+pred1 <- predict(rf.model, newdata=train_dat[, -1], by="class")
+table(pred1, train_dat$group)
+mean(pred1 == train_dat$group)
+
+pred1 <- predict(rf.model, newdata=test_dat[, -1], by="class")
+table(pred1, test_dat$group)
+mean(pred1 == test_dat$group)
+save(rf.model, file = "rf.model.rda")
+
+#GLM---------------------------------------------------
+set.seed(1234)
+train_ctrl = trainControl(method="repeatedcv", number=10, repeats=10, classProbs=TRUE, summaryFunction=twoClassSummary, allowParallel=TRUE)
+glm.model = train(group ~ ., data=train_dat, method="glm", metric="ROC", trControl=train_ctrl)
+print(glm.model)
+
+pred1 <- predict(glm.model, train_dat[, -1], by="response")
+table(pred1, train_dat$group)
+mean(pred1 == train_dat$group)
+
+pred1 <- predict(glm.model, test_dat[, -1], by="response")
+table(pred1, test_dat$group)
+mean(pred1 == test_dat$group)
+
+pred2 <- predict(glm.model, newdata=test_dat[, -1], by="response")
+table(pred2, test_dat$group)
+mean(pred2 == test_dat$group)
+#0.6850649
+save(glm.model, file = "glm.model.rda")
+
+#ROC---------------------------------------------------
+library(pROC)
+svmL.probs = predict(svm.model, test_dat[, -1], type="prob")
+svmL.ROC = roc(test_dat$group, svmL.probs[, 2], percent=TRUE)
+svmL.ROC$auc
+
+rf.probs = predict(rf.model, test_dat[, -1], type="prob")
+rf.ROC = roc(test_dat$group, rf.probs[, 2], percent=TRUE)
+rf.ROC$auc
+
+glm.probs = predict(glm.model, test_dat[, -1], type="prob")
+glm.ROC = roc(test_dat$group, glm.probs[, 2], percent=TRUE)
+glm.ROC$auc
+
+plot.roc(test_dat$group, rf.probs[, 2], percent=TRUE, smooth=T, col="black")
+plot.roc(test_dat$group, svmL.probs[, 2], percent=TRUE, smooth=T, col="#008600", add=TRUE)
+plot.roc(test_dat$group, glm.probs[, 2], percent=TRUE, smooth=T, col="#1c61b6", add=TRUE)
+
+legend("bottomright", legend=c("rf.model AUC=74.99%", "svm.model AUC=72.05%", "glm.model AUC=73.39%"), 
+       col=c("black", "#1c61b6", "#008600", "#840000"), lwd=2, cex=0.5, text.width=80)
+dev.off()
+
+library(pROC)
+svmL.probs = predict(svm.model, train_dat[, -1], type="prob")
+svmL.ROC = roc(train_dat$group, svmL.probs[, 2], percent=TRUE)
+svmL.ROC$auc
+
+rf.probs = predict(rf.model, train_dat[, -1], type="prob")
+rf.ROC = roc(train_dat$group, rf.probs[, 2], percent=TRUE)
+rf.ROC$auc
+
+glm.probs = predict(glm.model, train_dat[, -1], type="prob")
+glm.ROC = roc(train_dat$group, glm.probs[, 2], percent=TRUE)
+glm.ROC$auc
+
+plot.roc(train_dat$group, rf.probs[, 2], percent=TRUE, smooth=F, col="black")
+plot.roc(train_dat$group, svmL.probs[, 2], percent=TRUE, smooth=F, col="#008600", add=TRUE)
+plot.roc(train_dat$group, glm.probs[, 2], percent=TRUE, smooth=F, col="#1c61b6", add=TRUE)
+
+legend("bottomright", legend=c("rf.model AUC=100%", "svm.model AUC=81.84%", "glm.model AUC=84.03%"), 
+       col=c("black", "#1c61b6", "#008600", "#840000"), lwd=2, cex=0.5, text.width=80)
+dev.off()
+#Kaplan-Meier-------------------------------------------
+rm(list=ls())
+setwd("")
+load("step1_combat.rda")
+load("step2_km.rda")
+exp = combat_exprSet[,combat_samplefile$Sample_Group == "IP"]
+exp = exp[,match(samplefile$Sample_Name,colnames(exp))]
+
+tcga_clinical=read.table("combat_OS.txt", header=T, sep="\t", check.names=F,row.names =NULL)
+
+exp1 = as.data.frame(t(exp))
+exprSet1=exp1[tcga_clinical$Accession,]
+
+library(survival)
+brca_data <- as.data.frame(exp1)
+
+brca_data$Tumor_Sample_Barcode <- rownames(brca_data)
+
+colnames(tcga_clinical)
+brca_sur_data = tcga_clinical[,c(1,4,5)]colnames(brca_sur_data)[1] = "Tumor_Sample_Barcode"
+brca_sur_data <- merge(brca_sur_data, brca_data, by = 'Tumor_Sample_Barcode')
+
+
+rownames(brca_sur_data) = brca_sur_data$Tumor_Sample_Barcode
+colnames(brca_sur_data) <- gsub('\\-', "_", colnames(brca_sur_data))
+brca_sur_data = brca_sur_data[, -1]
+colnames(brca_sur_data)[1:2] = c("status","time")
+
+
+brca_data <- as.data.frame(brca_sur_data)
+brca_data$Tumor_Sample_Barcode <- rownames(brca_data)
+
+colnames(samplefile)
+brca_sur_data1 = samplefile[,c(1,2)]
+colnames(brca_sur_data1)[1] = "Tumor_Sample_Barcode"
+
+data = merge(brca_data,brca_sur_data1,  by = 'Tumor_Sample_Barcode')
+library(survminer)
+library("survival")
+km_dat = data
+fit_km <- survfit(Surv(time, status) ~ Subtype, data=km_dat)
+ggsurvplot(fit_km, conf.int=FALSE, pval=TRUE, legend.title="OS",  
+           legend.labs=c('cluster1', 'cluster2'), xlab='Time in years',              
+           risk.table=TRUE, risk.table.title="", risk.table.y.text.col=TRUE, 
+           risk.table.y.text=FALSE, risk.table.height=.25,
+           palette=c('#58CDD9','#EF767A'), break.time.by=1, surv.median.line='hv')        
+dev.off()
+#Power analysis-------------------
+library(pwr) 
+load("")
+exprSet = exprSet[,match(samplefile$Sample_Name,colnames(exprSet))]
+pwr.t2n.test(n1=30,n2=93,sig.level = 0.05,power = 0.9,alternative = "two.sided")
